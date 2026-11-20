@@ -1,0 +1,70 @@
+name: release
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+
+permissions: {}
+
+env:
+  CI: true
+  GOWORK: "off"
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  create-release:
+    name: create release from merged metadata
+    if: >-
+      github.event_name == 'pull_request'
+      && github.event.pull_request.merged
+      && github.event.pull_request.head.repo.full_name == github.repository
+      && github.event.pull_request.head.ref == 'release-please--branches--main'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: write
+      issues: write
+      pull-requests: write
+    steps:
+      - name: check out release source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: require successful main ci for release source
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git merge-base --is-ancestor HEAD origin/main
+          source_sha="$(git log --first-parent -1 --format=%H HEAD -- . \
+            ':(exclude)CHANGELOG.md' ':(exclude)release-please-manifest.json')"
+          test -n "$source_sha"
+          while read -r candidate; do
+            runs="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yml \
+              --branch main --event push --commit "$candidate" --status success \
+              --limit 1 --json databaseId --jq 'length')"
+            if [ "$runs" -eq 1 ]; then
+              exit 0
+            fi
+            if [ "$candidate" = "$source_sha" ]; then
+              break
+            fi
+          done < <(git rev-list --first-parent HEAD)
+          echo "Release source has no successful main CI run" >&2
+          exit 1
+      - name: create release and tag
+        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        with:
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+          target-branch: main
+          config-file: release-please-config.json
+          manifest-file: release-please-manifest.json
+          skip-github-pull-request: true
